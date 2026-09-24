@@ -10,7 +10,7 @@ on:
 jobs:
   run-rapise:
     # This is the equivalent of "pool: vmImage: ubuntu-latest"
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       # Step 1: Install Node.js
