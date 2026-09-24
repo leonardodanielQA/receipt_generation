@@ -1,0 +1,49 @@
+# .github/workflows/rapise-tests-node.yml
+
+name: Run Rapise Tests
+
+# This makes the workflow manually triggerable from the Actions tab
+# It's the direct equivalent of Azure DevOps' "trigger: none"
+on:
+  workflow_dispatch:
+
+jobs:
+  run-rapise:
+    # This is the equivalent of "pool: vmImage: ubuntu-latest"
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Install Node.js
+      # This is the equivalent of the "NodeTool@0" task
+      - name: Install Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      # Step 2: Install Rapise
+      # The 'run' keyword is the equivalent of 'script'
+      - name: Install Rapise
+        run: |
+          echo "Installing Rapise..."
+          npm install https://inflectra-rapise-nightly-installers.s3.eu-north-1.amazonaws.com/Rapise_9.0.35.24/rapise-9.0.35.24.tgz
+          
+      # Step 3: Configure the Rapise Launcher
+      - name: Configure Rapise Launcher
+        run: |
+          echo "Configuring RapiseLauncher..."
+          npx rapiselauncher -c RepositoryConnection.xml --set SpiraServer=https://televisa.spiraservice.net/ --set SpiraUser=leonardo.cruz --set SpiraPassword=${{ secrets.SPIRA_API_KEY }} --set AutomationHost=XXDARKANDRESXX
+      # Step 4: Run the Rapise Launcher
+      - name: Run Rapise Launcher
+        run: |
+          echo "Running RapiseLauncher..."
+          npx rapiselauncher -c RepositoryConnection.xml -t 292 --details --param "g_browserLibrary=Selenium - Chrome Headless"
+      # Step 5: Publish all files from working folder
+      - name: Upload Working Folder
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: working-folder
+          path: |
+            .
+            !node_modules
+            ~/.rapise/temp
