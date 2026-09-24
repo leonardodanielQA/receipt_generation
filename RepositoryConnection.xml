@@ -1,0 +1,7 @@
+<Settings>
+  <RepositoryType>SpiraTest</RepositoryType>
+  <RepositoryUrl>https://televisa.spiraservice.net/</RepositoryUrl>
+  <LoginName>leonardo.cruz</LoginName>
+  <ApiKey>tu_api_key_real</ApiKey>
+  <ProjectId>123</ProjectId>
+</Settings>
