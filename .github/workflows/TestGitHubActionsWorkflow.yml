@@ -1,58 +1,185 @@
 name: Run Rapise Tests
 
+# Objetivo: correr las suites de SpiraTest y dejar en el artifact el dashboard
+# HTML (informe por suite) y el consolidado de la corrida.
+#
+# POR QUE SE USA EL ACTION OFICIAL Y NO EL "npm install + npx rapiselauncher"
+# El workflow anterior seguia la KB940 de Inflectra, que es el metodo de "bajo
+# nivel" y carga con trabajo que el action ya hace:
+#   - Instalar Rapise y configurar RepositoryConnection.xml, que guarda la API
+#     key. Eso obligaba a generar el archivo en cada corrida y a ignorarlo en
+#     git (si se sube, la key queda en el historial para siempre).
+#   - Recoger artifacts a mano, con el error clasico de poner $env:USERPROFILE
+#     dentro de `with:` (no hay shell ahi, no se expande y se sube literal).
+# Con el action oficial: rapise_version fijada, RepositoryConnection.xml gestionado
+# por el action y artifacts subidos por el (screenshots, .trp, .tap, .log, .wmv).
 on:
   workflow_dispatch:
+    inputs:
+      caso:
+        description: "Ejecutar solo este caso de Spira (vacio = Test Set 4143)"
+        required: false
+        default: ""
+      ambiente:
+        description: "Ambiente (dev, qa, uat)"
+        required: false
+        default: qa
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rapise-qa-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RAPISE_VERSION: "9.1.36.42"
 
 jobs:
   run-rapise:
     runs-on: windows-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22.x"
-
-      - name: Install Rapise
-        shell: powershell
+      # Guardas del framework (regla 7): nomenclatura, integridad de casos y
+      # hojas RVL. Corta la corrida ANTES de gastar 30 min de Spira si un caso
+      # nuevo quedo mal declarado (name/alias/vpath aplanados, sin <AliasName>,
+      # EntryPoint inexistente...). Mismos validadores que corre
+      # Lib\Tools\new-test-case.ps1 al generar un caso.
+      - name: Validadores del framework
+        shell: pwsh
         run: |
-          Write-Host "Installing Rapise..."
-          npm install https://inflectra-rapise-nightly-installers.s3.eu-north-1.amazonaws.com/Rapise_9.0.35.24/rapise-9.0.35.24.tgz
+          $rc = 0
+          foreach ($v in @('validate_naming.ps1', 'validate_integrity.ps1',
+                           'validate_rvl_actions.ps1', 'validate_rvl_ids.ps1')) {
+            pwsh -NoProfile -ExecutionPolicy Bypass -File Lib\Tools\$v
+            if ($LASTEXITCODE -ne 0) { $rc = 1 }
+          }
+          exit $rc
 
-      - name: Configure Rapise Launcher
-        shell: powershell
+      # Credenciales del ambiente. Son para el framework (login SSO) y tambien
+      # para el paso de reportes: build-report.ps1 lee ESTAS MISMAS variables
+      # para tapar las credenciales en el HTML. El login es el unico lugar del
+      # que salen, asi que con esto el dashboard sale sin la clave en claro.
+      - name: Ejecutar tests en SpiraTest
+        uses: Inflectra/rapiselauncher-win-action@v2
         env:
-          SPIRA_API_KEY: ${{ secrets.SPIRA_API_KEY }}
+          TELEVISA_QA_USUARIO: ${{ secrets.TELEVISA_QA_USUARIO }}
+          TELEVISA_QA_CLAVE: ${{ secrets.TELEVISA_QA_CLAVE }}
+        with:
+          spira_url: 'https://televisa.spiraservice.net/'
+          # 4143 = Test Set "Default" de TestSetLaunch.tst (TC903, TC904, TC905).
+          # Con input se puede correr un caso suelto para depurar.
+          spira_test_set_id: ${{ inputs.caso || '4143' }}
+          spira_username: 'leonardo.cruz'
+          spira_api_key: ${{ secrets.SPIRA_API_KEY }}
+          spira_automation_host: 'XXDARKANDRESXX'
+
+          # Version validada en local (la que trae SeSOnTestReportReady).
+          rapise_version: ${{ env.RAPISE_VERSION }}
+
+          # Resolucion ANTES de correr. Es lo que hace que las capturas de
+          # evidencia salgan a pantalla completa en vez del 800x600 por defecto
+          # del headless: en CI no hay Maximize() que valga (ver MaximizarNavegador
+          # en Components\Common/funciones.js).
+          set_screen_size: 'true'
+          screen_width: '1920'
+          screen_height: '1080'
+
+          # Video de la corrida: para diagnosticar fallos de UI es mas util que
+          # un log, y Spira lo adjunta al Test Run.
+          record_video: 'true'
+          capture_screenshots: 'true'
+          timeout_minutes: '30'
+# --- Reportes (aportacion propia del framework) ------------------------
+      # El hook SeSOnTestReportReady de Components\Common\funciones.js esta
+      # registrado, pero medido el 05/10 sobre Rapise 9.1.36.42: el motor
+      # instrumenta 'require' y no crea el proceso hijo, asi que el hook NO
+      # genera nada (ni error ni HTML). Por eso la generacion se hace aqui, en el
+      # paso, que es la via comprobada. Este paso es el que produce el entregable.
+      #
+      # -Consolidar/merge-report no puede : el consolidador
+      # solo agrupa los .trp que comparten la clave "Corrida:" del run.
+      - name: Generar dashboard y reporte consolidado
+        if: always()
+        shell: pwsh
+        env:
+          TELEVISA_QA_USUARIO: ${{ secrets.TELEVISA_QA_USUARIO }}
+          TELEVISA_QA_CLAVE: ${{ secrets.TELEVISA_QA_CLAVE }}
         run: |
-          Write-Host "Configuring RapiseLauncher..."
+          # 1) Espera a que el launcher termine de escribir los .trp.
+          $deadline = (Get-Date).AddMinutes(5)
+          do {
+            $n = @(Get-ChildItem 'Reports\TC90*.trp' -ErrorAction SilentlyContinue).Count
+            if ($n -gt 0) { break }
+            Start-Sleep -Seconds 10
+          } while ((Get-Date) -lt $deadline)
 
-          npx rapiselauncher `
-            -c RepositoryConnection.xml `
-            --set SpiraServer=https://televisa.spiraservice.net/ `
-            --set SpiraUser=leonardo.cruz `
-            --set SpiraPassword="$env:SPIRA_API_KEY" `
-            --set AutomationHost=XXDARKANDRESXX
+          $trps = @(Get-ChildItem 'Reports\TC90*.trp' -ErrorAction SilentlyContinue)
+          Write-Host "[INFO] .trp de suite: $($trps.Count)"
+          if ($trps.Count -eq 0) {
+            Write-Warning "No hay Reports\TC90*.trp: revisa el paso anterior"
+            exit 0
+          }
 
-      - name: Execute SpiraTest Case 292
-        shell: powershell
-        run: |
-          Write-Host "Executing SpiraTest case 292..."
+          # 2) Un dashboard por suite.
+          foreach ($t in $trps) {
+            pwsh -NoProfile -ExecutionPolicy Bypass -File Lib\Tools\build-report.ps1 -Trp $t.FullName
+          }
 
-          npx rapiselauncher `
-            -c RepositoryConnection.xml `
-            -t 292 `
-            --details `
-            --param "g_browserLibrary=Selenium - Chrome Headless"
+          # 3) El consolidado de la corrida (las 3 suites en un HTML).
+          #    merge-report.ps1 autodetecta Reports\TC90*.trp si no se le pasan.
+          pwsh -NoProfile -ExecutionPolicy Bypass -File Lib\Tools\merge-report.ps1
 
-      - name: Upload Rapise results
+          # 4) Verificacion: si el HTML salio con credenciales en claro, eso es un
+          #    fallo de seguridad, no un detalle estetico.
+          $clave = $env:TELEVISA_QA_CLAVE
+          $html  = @(Get-ChildItem 'Reports\*.html' -ErrorAction SilentlyContinue)
+          Write-Host "[INFO] HTML generados: $($html.Count)"
+          if ($clave) {
+            $filtran = @($html | Where-Object {
+              (Get-Content $_.FullName -Raw).Contains($clave)
+            })
+            if ($filtran.Count -gt 0) {
+              Write-Error ("FUGA DE CREDENCIALES en: " +
+                (($filtran | ForEach-Object Name) -join ', '))
+            } else {
+              Write-Host "[OK] Ningun HTML contiene la contrasena en claro"
+            }
+          }
+
+      - name: Publicar evidencia y reportes
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rapise-results
+          name: dashboard-y-evidencia
+          retention-days: 30
+          # Rutas explicitas: subir "." arrastraria .git y node_modules (cientos
+          # de MB) y dejaria el artifact inutil.
           path: |
-            .
-            !node_modules
-            $env:USERPROFILE\.rapise\temp
+            Reports/*.html
+            Reports/*.trp
+            Evidence/**
+            out.log
+            err.log
+
+      - name: Resultado
+        if: always()
+        shell: pwsh
+        run: |
+          # El veredicto NO es el ExitCode del launcher (devuelve 0 aunque haya
+          # asserts en Fail). Dictamina el reporte, igual que check-trp.ps1.
+          $fallos = 0
+          Get-ChildItem 'Reports\TC90*.trp' -ErrorAction SilentlyContinue | ForEach-Object {
+            $t = [System.IO.File]::ReadAllText($_.FullName)
+            $s = ([regex]::Matches($t, 'Failed:(\d+)') |
+                  ForEach-Object { [int]$_.Groups[1].Value } |
+                  Measure-Object -Sum).Sum
+            if ($s) { Write-Host "[FALLA] $($_.Name): $s aserciones"; $fallos += $s }
+          }
+          if ($fallos -gt 0) { exit 1 }
+          Write-Host "[OK] Sin aserciones fallidas"
+# WORKFLOW-PARTE-2
